@@ -343,8 +343,9 @@ of found file-paths and replacements."
 
 ;; Note
 
-(defun org-anki--note-at-point ()
-  "Create an Anki note from whereever the cursor is"
+(defun org-anki--note-at-point (&optional override-deck)
+  "Create an Anki note from whereever the cursor is.
+When OVERRIDE-DECK is non-nil, use it instead of the entry/file/default deck."
   ;; :: IO Note
   (-let*
       ((maybe-id (org-entry-get nil org-anki-prop-note-id))
@@ -353,7 +354,8 @@ of found file-paths and replacements."
        (fields (plist-to-assoc fields-plist))
        ((_ . templates) (assoc type org-anki-field-templates))
        (tags (org-anki--get-tags))
-       (deck (org-anki--find-prop org-anki-prop-deck org-anki-default-deck))
+       (deck (or override-deck
+                 (org-anki--find-prop org-anki-prop-deck org-anki-default-deck)))
        (marker (point-marker)))
 
     (make-org-anki--note
@@ -907,8 +909,7 @@ GROUPED-LINKS is from `org-anki--moc-collect-links'."
                                          deck (list tag))))
                               (push note notes))
                           ;; Entry-level note
-                          (let ((note (org-anki--note-at-point)))
-                            (setf (org-anki--note-deck note) deck)
+                          (let ((note (org-anki--note-at-point deck)))
                             (setf (org-anki--note-tags note)
                                   (delete-dups
                                    (append (org-anki--note-tags note) (list tag))))
