@@ -820,7 +820,7 @@ be removed from the Anki app, return actions that do that."
 When OVERRIDE-DECK is non-nil, use it instead of file/default deck."
   (save-excursion
     (goto-char (point-min))
-    (let* ((title (org-anki--get-global-prop "TITLE"))
+    (-let* ((title (org-anki--get-global-prop "TITLE"))
            (maybe-id (org-entry-get nil org-anki-prop-note-id))
            (initial-type (or (org-anki--get-global-prop org-anki-note-type)
                              org-anki-default-note-type))
