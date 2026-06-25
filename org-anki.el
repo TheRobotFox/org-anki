@@ -40,6 +40,7 @@
 (require 'request)
 (require 'thunk)
 (require 'base64)
+(require 'org-id)
 
 ;; Constants
 
@@ -777,7 +778,175 @@ be removed from the Anki app, return actions that do that."
    'org-anki-model-fields
    (cons `(,model ,@field-names) org-anki-model-fields)))
 
+;;; File-level notes (e.g. org-roam files without subheadings)
+
+(defun org-anki--file-body ()
+  "Get buffer content after front-matter keywords, for use as card back."
+  (save-excursion
+    (goto-char (point-min))
+    ;; Skip keyword lines (#+KEY: value) and blank lines at the top
+    (while (and (not (eobp))
+                (looking-at "^\\(#\\+\\|[ \t]*$\\)"))
+      (forward-line 1))
+    ;; Skip file-level property drawer if present
+    (when (looking-at "^[ \t]*:PROPERTIES:")
+      (re-search-forward "^[ \t]*:END:" nil t)
+      (forward-line 1))
+    ;; Skip any trailing blank lines after front-matter
+    (while (and (not (eobp)) (looking-at "^[ \t]*$"))
+      (forward-line 1))
+    (string-trim (buffer-substring-no-properties (point) (point-max)))))
+
+(defun org-anki--file-tags ()
+  "Get tags from #+filetags and #+ANKI_TAGS keywords."
+  (let* ((filetags (org-anki--get-global-prop "FILETAGS"))
+         (global-tags (org-anki--get-global-prop org-anki-prop-global-tags))
+         (raw (concat filetags global-tags)))
+    (cl-delete-if
+     (lambda (tag) (or (string-empty-p tag)
+                       (member tag org-anki-ignored-tags)))
+     (delete-dups (split-string raw ":" t)))))
+
+(defun org-anki--note-from-file ()
+  "Create an Anki note from file-level title and body content."
+  (save-excursion
+    (goto-char (point-min))
+    (let* ((title (org-anki--get-global-prop "TITLE"))
+           (maybe-id (org-entry-get nil org-anki-prop-note-id))
+           (initial-type (or (org-anki--get-global-prop org-anki-note-type)
+                             org-anki-default-note-type))
+           (body (org-anki--file-body))
+           (front (org-anki--org-to-html title))
+           (back (org-anki--org-to-html body))
+           (type (or (org-anki--is-cloze front)
+                     (org-anki--is-cloze back)
+                     initial-type))
+           (fields
+            (cond
+             ((org-anki--is-cloze front)
+              `(("Text" . ,front) ,@(if (not (string-empty-p back)) `(("Extra" . ,back)))))
+             ((org-anki--is-cloze back)
+              `(("Text" . ,back)))
+             (t
+              (let ((model-fields (org-anki--get-model-fields initial-type)))
+                (-zip-with 'cons model-fields (list front back))))))
+           ((_ . templates) (assoc type org-anki-field-templates))
+           (tags (org-anki--file-tags))
+           (deck (or (org-anki--get-global-prop org-anki-prop-deck)
+                     org-anki-default-deck))
+           (marker (point-min-marker)))
+      (unless title
+        (error "No #+title: found in buffer"))
+      (unless deck
+        (error "No deck specified (set #+ANKI_DECK: or org-anki-default-deck)"))
+      (make-org-anki--note
+       :maybe-id (if (stringp maybe-id) (string-to-number maybe-id))
+       :fields   (org-anki--apply-templates fields templates)
+       :tags     tags
+       :deck     deck
+       :type     type
+       :marker   marker))))
+
+;;; MOC (Map of Content) sync
+
+(defun org-anki--moc-collect-links ()
+  "Collect id links from the current MOC buffer grouped by heading.
+Returns a list of (HEADING-TAG . ((ID . DESCRIPTION) ...))."
+  (let ((result nil)
+        (current-heading nil))
+    (org-element-map (org-element-parse-buffer) '(headline link)
+      (lambda (el)
+        (pcase (org-element-type el)
+          ('headline
+           (setq current-heading (org-element-property :raw-value el)))
+          ('link
+           (when (equal "id" (org-element-property :type el))
+             (let* ((id (org-element-property :path el))
+                    (desc (or (org-element-interpret-data
+                               (org-element-contents el))
+                              id)))
+               (push (cons id desc)
+                     (alist-get current-heading result nil nil #'equal))))))))
+    (--map (cons (car it) (nreverse (cdr it))) result)))
+
+(defun org-anki--heading-to-tag (heading)
+  "Convert a heading string to a valid org/Anki tag."
+  (replace-regexp-in-string
+   "[^[:alnum:]_]+" "_"
+   (string-trim heading)))
+
+(defun org-anki--note-from-file-with-overrides (deck extra-tags)
+  "Like `org-anki--note-from-file' but override DECK and append EXTRA-TAGS."
+  (let ((note (org-anki--note-from-file)))
+    (setf (org-anki--note-deck note) deck)
+    (setf (org-anki--note-tags note)
+          (delete-dups (append (org-anki--note-tags note) extra-tags)))
+    note))
+
+(defun org-anki--moc-resolve-notes (deck grouped-links)
+  "Resolve MOC links to notes. DECK is the target deck name.
+GROUPED-LINKS is from `org-anki--moc-collect-links'."
+  (let ((notes nil)
+        (errors nil))
+    (dolist (group grouped-links)
+      (-let [(heading . links) group]
+        (let ((tag (org-anki--heading-to-tag heading)))
+          (dolist (link links)
+            (-let [(id . _desc) link]
+              (let ((location (org-id-find id)))
+                (if (not location)
+                    (push id errors)
+                  (-let [(file . pos) location]
+                    (with-current-buffer (find-file-noselect file)
+                      (save-excursion
+                        (goto-char (or pos (point-min)))
+                        (if (org-before-first-heading-p)
+                            ;; File-level note (org-roam style)
+                            (let ((note (org-anki--note-from-file-with-overrides
+                                         deck (list tag))))
+                              (push note notes))
+                          ;; Entry-level note
+                          (let ((note (org-anki--note-at-point)))
+                            (setf (org-anki--note-deck note) deck)
+                            (setf (org-anki--note-tags note)
+                                  (delete-dups
+                                   (append (org-anki--note-tags note) (list tag))))
+                            (push note notes)))))))))))))
+    (when errors
+      (org-anki--report-error
+       "Could not resolve %d IDs: %s"
+       (length errors)
+       (mapconcat 'identity (seq-take errors 5) ", ")))
+    (nreverse notes)))
+
 ;;; Interactive commands
+
+;;;###autoload
+(defun org-anki-sync-file ()
+  ;; :: IO ()
+  "Synchronize the whole file as a single note.
+Uses #+title: as the card front and the file body as the back.
+Useful for org-roam files without independent subheadings."
+  (interactive)
+  (org-anki--sync-notes (list (org-anki--note-from-file))))
+
+;;;###autoload
+(defun org-anki-sync-moc ()
+  ;; :: IO ()
+  "Synchronize all linked notes in a MOC (Map of Content) file.
+Uses #+title: as the deck name. Each heading in the MOC becomes a
+tag on the cards beneath it. Links are resolved via `org-id-find'
+and each linked file/entry is synced as a card."
+  (interactive)
+  (let* ((deck (or (org-anki--get-global-prop "TITLE")
+                   (error "No #+title: found in MOC buffer")))
+         (grouped-links (org-anki--moc-collect-links))
+         (notes (org-anki--moc-resolve-notes deck grouped-links)))
+    (if notes
+        (progn
+          (org-anki--report "Syncing %d notes from MOC to deck '%s'" (length notes) deck)
+          (org-anki--sync-notes notes))
+      (org-anki--report "No linked notes found in MOC"))))
 
 ;;;###autoload
 (defun org-anki-sync-entry ()
