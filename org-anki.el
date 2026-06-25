@@ -807,8 +807,9 @@ be removed from the Anki app, return actions that do that."
                        (member tag org-anki-ignored-tags)))
      (delete-dups (split-string raw ":" t)))))
 
-(defun org-anki--note-from-file ()
-  "Create an Anki note from file-level title and body content."
+(defun org-anki--note-from-file (&optional override-deck)
+  "Create an Anki note from file-level title and body content.
+When OVERRIDE-DECK is non-nil, use it instead of file/default deck."
   (save-excursion
     (goto-char (point-min))
     (let* ((title (org-anki--get-global-prop "TITLE"))
@@ -832,7 +833,8 @@ be removed from the Anki app, return actions that do that."
                 (-zip-with 'cons model-fields (list front back))))))
            ((_ . templates) (assoc type org-anki-field-templates))
            (tags (org-anki--file-tags))
-           (deck (or (org-anki--get-global-prop org-anki-prop-deck)
+           (deck (or override-deck
+                     (org-anki--get-global-prop org-anki-prop-deck)
                      org-anki-default-deck))
            (marker (point-min-marker)))
       (unless title
@@ -877,8 +879,7 @@ Returns a list of (HEADING-TAG . ((ID . DESCRIPTION) ...))."
 
 (defun org-anki--note-from-file-with-overrides (deck extra-tags)
   "Like `org-anki--note-from-file' but override DECK and append EXTRA-TAGS."
-  (let ((note (org-anki--note-from-file)))
-    (setf (org-anki--note-deck note) deck)
+  (let ((note (org-anki--note-from-file deck)))
     (setf (org-anki--note-tags note)
           (delete-dups (append (org-anki--note-tags note) extra-tags)))
     note))
