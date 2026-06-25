@@ -243,7 +243,13 @@ with result."
    '(("\\begin{equation}" . "\\\\[")
      ("\\end{equation}"   . "\\\\]")
      ("\\begin{align}"    . "\\\\[\n\\\\begin{aligned}")
-     ("\\end{align}"      . "\\\\end{aligned}\n\\\\]"))))
+     ("\\end{align}"      . "\\\\end{aligned}\n\\\\]")
+     ("\\begin{align*}"   . "\\\\[\n\\\\begin{aligned}")
+     ("\\end{align*}"     . "\\\\end{aligned}\n\\\\]")
+     ("\\begin{gather}"   . "\\\\[\n\\\\begin{gathered}")
+     ("\\end{gather}"     . "\\\\end{gathered}\n\\\\]")
+     ("\\begin{gather*}"  . "\\\\[\n\\\\begin{gathered}")
+     ("\\end{gather*}"    . "\\\\end{gathered}\n\\\\]"))))
 
 (defun org-anki--apply-templates (fields templates)
   (--map
